@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package>
+  <name>infotaxis</name>
+  <version>0.0.1</version>
+  <description>An Infotaxis node using libinfotaxis to guide a robot </description>
+
+  <maintainer email="nv@neuroveretx.eu">Neurovertex</maintainer>
+  <author email="nv@neuroveretx.eu">Neurovertex</author>
+
+  <license>BSD</license>
+
+
+  <!-- Url tags are optional, but mutiple are allowed, one per tag -->
+  <!-- Optional attribute type can be: website, bugtracker, or repository -->
+  <!-- Example: -->
+  <!-- <url type="website">http://wiki.ros.org/infotaxis</url> -->
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>roscpp</build_depend>
+  <build_depend>tf2</build_depend>
+  <build_depend>move_base_msgs</build_depend>
+  <build_depend>actionlib</build_depend>
+  <run_depend>roscpp</run_depend>
+  <run_depend>tf2</run_depend>
+  <run_depend>move_base_msgs</run_depend>
+  <run_depend>actionlib</run_depend>
+
+  <export>
+  </export>
+</package>
