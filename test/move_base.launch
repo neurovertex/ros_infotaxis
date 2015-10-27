@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+	<node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen">
+		<!--<remap from="laser_scan_sensor" to="base_scan" />-->
+		<param name="base_local_planner" value="dwa_local_planner/DWAPlannerROS" />
+		<!--<param name="base_local_planner" value="base_local_planner/TrajectoryPlannerROS" />-->
+		<rosparam file="./params/costmap_common.yaml" command="load" ns="global_costmap"/>
+		<rosparam file="./params/costmap_common.yaml" command="load" ns="local_costmap"/>
+		<rosparam file="./params/costmap.yaml" command="load"/>
+	</node>
+</launch>
