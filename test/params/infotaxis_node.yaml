@@ -18,8 +18,9 @@ max_stepnumber: 200
 
 publish_backtrace: true
 print_images: true
+image_dir: pictures
 detect_while_moving: true
-detect_while_moving: 4
+moving_image_write_frequency: 4
 run_rate: 1
 #simulate_source: false
 simulate_source: true

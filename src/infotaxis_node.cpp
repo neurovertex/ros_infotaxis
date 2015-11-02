@@ -136,7 +136,6 @@ int8_t getCostMapAt(Pose pose, SubscribedMapTypes type) {
 		if (gridx < 0 || gridy < 0 || gridx >= map->info.width || gridy >= map->info.height) {
 			if (type == LOCAL_COSTMAP)
 				return 0;
-			ROS_ERROR("Error: costmap lookup outside of costmap boundaries (%d:%d)", gridx, gridy);
 			return -1;
 		}
 		ROS_DEBUG("Requested relative coords: %.2f:%.2f. Abs coords: %.2f:%.2f. Grid coords : %d:%d. Value : %u",
@@ -145,7 +144,6 @@ int8_t getCostMapAt(Pose pose, SubscribedMapTypes type) {
 		gridx, gridy, (uint8_t)map->data[gridx + gridy*map->info.width]);
 		return map->data[gridx + gridy*map->info.width];
 	}
-	ROS_ERROR("Error : no costmap received");
 	return -1;
 }
 
@@ -202,6 +200,7 @@ int main(int argc, char *argv[]) {
 	bool simulate, printimages, detect_while_moving, fast, publish_backtrace;
 	int w, h, ttl, min_stepnumber, stepnumber, max_stepnumber,
 		movingImageWriteFrequency;
+	string imageDir;
 
 	priv.param("gas_diffusivity", diff, 10.);
 	priv.param("gas_diff_rate", diffrate, 1.);
@@ -221,8 +220,9 @@ int main(int argc, char *argv[]) {
 
 	priv.param("publish_backtrace", publish_backtrace, true);
 	priv.param("print_images", printimages, true);
+	priv.param("image_dir", imageDir, true);
 	priv.param("detect_while_moving", detect_while_moving, true);
-	priv.param("detect_while_moving", movingImageWriteFrequency, 4);
+	priv.param("moving_image_write_frequency", movingImageWriteFrequency, 4);
 	priv.param("goal_tolerance", goalTolerance, .2);
 	priv.param("source_x", sourcex, 0.);
 	priv.param("source_y", sourcey, 0.);
@@ -244,6 +244,10 @@ int main(int argc, char *argv[]) {
 	Publisher sourcepos_publisher, backtrace_publisher;
 	if (simulate)
 		sourcepos_publisher = priv.advertise<PoseStamped>("source_pos", 1, true);
+	else {
+		ROS_FATAL("Error: Actual sensor reading not implemented yet.");
+		return 1;
+	}
 	if (publish_backtrace)
 		backtrace_publisher = priv.advertise<nav_msgs::Path>("backtrace", 1, true);
 
@@ -285,12 +289,7 @@ int main(int argc, char *argv[]) {
 	source_pose.pose.position.z = 0;
 	source_pose.pose.orientation = tf::createQuaternionMsgFromYaw(windagl);
 
-	system("rm -f pictures/*.png"); // clear iteration frames
 	int seq = 0, imageseq = 0;
-	if (printimages) {
-		int gridsourcex = (int)((sourcex-originx)*resolution), gridsourcey = (int)((sourcey-originy)*resolution);
-		writeGrid("pictures/meanfield.png", 0, 0, 1, &gridsourcex, &gridsourcey);
-	}
 
 	boost::shared_ptr<nav_msgs::OccupancyGrid> occupancyGrid = buildOccupancyGrid();
 	nav_msgs::Path backtrace;
@@ -298,6 +297,13 @@ int main(int argc, char *argv[]) {
 
 	vector<struct move> directions, prev_directions;
 	char* filename = new char[64];
+	if (printimages) {
+		sprintf(filename, "rm -f %s/*.png", imageDir);
+		system(filename); // clear iteration frames
+		sprintf(filename, "%s/meanfield.png", imageDir);
+		int gridsourcex = (int)((sourcex-originx)*resolution), gridsourcey = (int)((sourcey-originy)*resolution);
+		writeGrid("pictures/meanfield.png", 0, 0, 1, &gridsourcex, &gridsourcey);
+	}
 
 	while(ok()) {
 		ROS_DEBUG("State : %s (%d)", STATE_NAMES[nextstate], nextstate);
@@ -350,36 +356,37 @@ int main(int argc, char *argv[]) {
 					}
 				}
 				break;
-				case STATE_MOVING:
-				ROS_DEBUG("State : %s", mbc.getState().getText());
-				if (mbc.getState() == actionlib::SimpleClientGoalState::SUCCEEDED ||
-						hypot(goal.target_pose.pose.position.x - basePoint.x,
-						goal.target_pose.pose.position.y - basePoint.y) <= goalTolerance) {
-							// Arrived at goal or close enough
-					if (simulate && hypot(basePoint.x - sourcex, basePoint.y - sourcey) < 1.) {
-						ROS_INFO("Source found !");
-						nextstate = STATE_EXIT;
-					} else {
-						ROS_INFO("Destination reached. Distance to source : %.3f", hypot(basePoint.x - sourcex, basePoint.y - sourcey));
-						nextstate = (detect_while_moving) ? STATE_PLANNING : STATE_DETECTING;
+				case STATE_MOVING: {
+					ROS_DEBUG("State : %s", mbc.getState().getText());
+					if (mbc.getState() == actionlib::SimpleClientGoalState::SUCCEEDED ||
+							hypot(goal.target_pose.pose.position.x - basePoint.x,
+							goal.target_pose.pose.position.y - basePoint.y) <= goalTolerance) {
+								// Arrived at goal or close enough
+						if (simulate && hypot(basePoint.x - sourcex, basePoint.y - sourcey) < 1.) {
+							ROS_INFO("Source found !");
+							nextstate = STATE_EXIT;
+						} else {
+							ROS_INFO("Destination reached. Distance to source : %.3f", hypot(basePoint.x - sourcex, basePoint.y - sourcey));
+							nextstate = (detect_while_moving) ? STATE_PLANNING : STATE_DETECTING;
+						}
+					} else if (mbc.getState().isDone()) {
+						double	goaldist = hypot(goal.target_pose.pose.position.x - basePoint.x,
+												goal.target_pose.pose.position.y - basePoint.y),
+								sourcedist = hypot(prevPose.x - basePoint.x,
+													prevPose.y - basePoint.y);
+						ROS_ERROR("move_base returned failure state : %s", mbc.getState().getText().c_str());
+						if (goaldist < sourcedist) {
+							ROS_ERROR("Closer to destination than source : using new destinations");
+						} else {
+							ROS_ERROR("Closer to source than destination : restoring old goals");
+							directions = prev_directions;
+						}
+						nextstate = STATE_PLANNING;
+					} else if (directions.size() < max_stepnumber) {
+						addMoves(gridx, gridy, goal.target_pose.pose.position, dt, stepnumber, directions);
 					}
-				} else if (mbc.getState().isDone()) {
-					double	goaldist = hypot(goal.target_pose.pose.position.x - basePoint.x,
-											goal.target_pose.pose.position.y - basePoint.y),
-							sourcedist = hypot(prevPose.x - basePoint.x,
-												prevPose.y - basePoint.y);
-					ROS_ERROR("move_base returned failure state : %s", mbc.getState().getText().c_str());
-					if (goaldist < sourcedist) {
-						ROS_ERROR("Closer to destination than source : using new destinations");
-					} else {
-						ROS_ERROR("Closer to source than destination : restoring old goals");
-						directions = prev_directions;
-					}
-					nextstate = STATE_PLANNING;
-				} else if (directions.size() < max_stepnumber) {
-					addMoves(gridx, gridy, goal.target_pose.pose.position, dt, stepnumber, directions);
 				}
-				if (!detect_while_moving)
+				if (!detect_while_moving) // If true, fall through to DETECTING
 					break;
 				case STATE_DETECTING: {
 					int detections = simulateDetectAt(gridx, gridy, (int)((sourcex-originx)*resolution), (int)((sourcey-originy)*resolution), dt);
@@ -390,7 +397,7 @@ int main(int argc, char *argv[]) {
 					if (printimages && (currentstate == STATE_DETECTING ||
 							// while moving, only write images at the given frequency
 							(currentstate == STATE_MOVING && (seq % movingImageWriteFrequency) == 0))) {
-						sprintf(filename, "pictures/iteration%04d.png", imageseq++);
+						sprintf(filename, "%s/iteration%04d.png", imageDir, imageseq++);
 						writeGrid(filename, gridx, gridy, 1, nullptr, nullptr);
 					}
 					if (currentstate == STATE_DETECTING)
@@ -457,15 +464,6 @@ void addMoves(double gridx, double gridy, Point ori, double dt, int n, vector<st
 		Pose pose;
 		pose.position.x = ori.x + x;
 		pose.position.y = ori.y + y;
-		ROS_INFO("x=%f, y=%f, origin.x=%f, origin.y=%f, width=%f, height=%f, xmax=%f, ymax=%f",
-			x, y, mapinfo.origin.position.x, mapinfo.origin.position.y,
-			mapinfo.width * mapinfo.resolution, mapinfo.height * mapinfo.resolution,
-			mapinfo.origin.position.x + (mapinfo.width * mapinfo.resolution),
-			mapinfo.origin.position.y + (mapinfo.height * mapinfo.resolution));
-		if (x < mapinfo.origin.position.x || y < mapinfo.origin.position.y ||
-			x >= mapinfo.origin.position.x + (mapinfo.width * mapinfo.resolution) ||
-			y >= mapinfo.origin.position.y + (mapinfo.height * mapinfo.resolution))
-				continue; // Outside of map boundaries
 		pose.position.z = 0;
 		pose.orientation = tf::createQuaternionMsgFromYaw(angle);
 		if (!isfinite(pose.position.x) || !isfinite(pose.position.y)) {
@@ -476,8 +474,8 @@ void addMoves(double gridx, double gridy, Point ori, double dt, int n, vector<st
 		if (checkMaps(pose)) {
 			infotaxis::Direction direc = {x * resolution, y * resolution};
 			moves.push_back((struct move){direc, pose, static_grid->getMoveValue(gridx, gridy, dt, direc)});
+			angle += 2*M_PI/n;
 		} else
 			ROS_DEBUG("Move at %.1f obstructed", angle*180/M_PI);
-		angle += 2*M_PI/n;
 	}
 }
