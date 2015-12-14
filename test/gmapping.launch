@@ -24,10 +24,10 @@
 		<param name="resampleThreshold" value="0.5"/>
 		<param name="particles" value="10"/>
 
-		<param name="xmin" value="-4.0"/>
-		<param name="ymin" value="-4.0"/>
-		<param name="xmax" value="4.0"/>
-		<param name="ymax" value="4.0"/>
+		<param name="xmin" value="-2.0"/>
+		<param name="ymin" value="-2.0"/>
+		<param name="xmax" value="2.0"/>
+		<param name="ymax" value="2.0"/>
 
 		<param name="delta" value="0.05"/>
 		<param name="llsamplerange" value="0.01"/>

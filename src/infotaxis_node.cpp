@@ -24,12 +24,16 @@ using namespace geometry_msgs;
 
 typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MoveBaseClient;
 
-static auto static_map = 		nav_msgs::OccupancyGrid::ConstPtr();
-static auto static_grid = 		boost::shared_ptr<infotaxis::InfotaxisGrid>();
-static auto static_local_costmap  =	nav_msgs::OccupancyGrid::ConstPtr();
-static auto static_global_costmap = nav_msgs::OccupancyGrid::ConstPtr();
-static tf::TransformListener 	*static_tfl;
+static double rescale_ratio = NAN;
+static int tot_xoff = 0, tot_yoff = 0;
+static auto s_map = 		nav_msgs::OccupancyGrid::ConstPtr();
+static auto s_grid = 		boost::shared_ptr<infotaxis::InfotaxisGrid>();
+static auto s_local_costmap  =	nav_msgs::OccupancyGrid::ConstPtr();
+static auto s_global_costmap = nav_msgs::OccupancyGrid::ConstPtr();
+static tf::TransformListener 	*s_tfl;
 //static Publisher grid_publisher;
+
+static double resolution, max_stepdist, med_stepdist, min_stepdist;
 
 enum RobotStates {
 	STATE_EXIT = 0,
@@ -40,27 +44,38 @@ enum RobotStates {
 
 static const char* STATE_NAMES[] = {"EXIT", "DETECTING", "PLANNING", "MOVING"};
 
-enum SubscribedMapTypes {
+enum class SubscribedMapTypes {
 	STATIC_MAP,
 	LOCAL_COSTMAP,
 	GLOBAL_COSTMAP
 };
 
 void cmd_callback(const nav_msgs::OccupancyGrid::ConstPtr& map, SubscribedMapTypes type) {
-	ROS_DEBUG("Received %smap", type == STATIC_MAP ? "" : "cost");
+	ROS_DEBUG("Received %smap", type == SubscribedMapTypes::STATIC_MAP ? "" : "cost");
 	if (map) {
 		ROS_DEBUG("seq:%u, res:%f, size:%ux%u, pos:%f:%f:%f\n", map->header.seq, map->info.resolution, map->info.width, map->info.height, map->info.origin.position.x, map->info.origin.position.y, map->info.origin.position.z);
-		if (type == STATIC_MAP) {
-			if (static_map && (static_map->info.width != map->info.width || static_map->info.height != map->info.height)) {
-				ROS_FATAL("Map updated with different dimensions : unsupported. Shutting down.");
-				shutdown();
-			} else {
-				static_map = map;
+	if (type == SubscribedMapTypes::STATIC_MAP) {
+			if (s_map && (s_map->info.width != map->info.width || s_map->info.height != map->info.height)) {
+				int w = ceil(map->info.width * map->info.resolution * resolution);
+				int h = ceil(map->info.height * map->info.resolution * resolution);
+				int xoff = (int)((s_map->info.origin.position.x-map->info.origin.position.x) * resolution);
+				int yoff = (int)((s_map->info.origin.position.y-map->info.origin.position.y) * resolution);
+				tot_xoff += xoff;
+				tot_yoff += yoff;
+				ROS_INFO("Map updated with different dimensions : Resizing from %d:%d to %d:%d + %d:%d (rescale dimension %d)...",
+					s_grid->getWidth(), s_grid->getHeight(), w,h,xoff,yoff, (int)(max(w, h)/rescale_ratio));
+				ROS_INFO("%f - %f, %f - %f, %f", s_map->info.origin.position.x-map->info.origin.position.x,
+					s_map->info.origin.position.y-map->info.origin.position.y, resolution);
+				s_grid = boost::shared_ptr<infotaxis::InfotaxisGrid>(s_grid->resize(
+					w, h, xoff, yoff, infotaxis::ResizeMethod::RESCALE,
+					(int)(max(w, h)/rescale_ratio)));
+				ROS_INFO("Done!");
 			}
-		} else if (type == GLOBAL_COSTMAP)
-			static_global_costmap = map;
-		else if (type == LOCAL_COSTMAP)
-			static_local_costmap = map;
+			s_map = map;
+		} else if (type == SubscribedMapTypes::GLOBAL_COSTMAP)
+			s_global_costmap = map;
+		else if (type == SubscribedMapTypes::LOCAL_COSTMAP)
+			s_local_costmap = map;
 		else
 			ROS_FATAL("Unsupported map type : %d", type);
 	} else {
@@ -69,24 +84,24 @@ void cmd_callback(const nav_msgs::OccupancyGrid::ConstPtr& map, SubscribedMapTyp
 }
 
 void cmd_callback1(const nav_msgs::OccupancyGrid::ConstPtr& map) {
-	cmd_callback(map, STATIC_MAP);
+	cmd_callback(map, SubscribedMapTypes::STATIC_MAP);
 }
 
 boost::shared_ptr<nav_msgs::OccupancyGrid> buildOccupancyGrid() {
 	static uint32_t seq = 1;
 	ROS_DEBUG("Sending map");
 	auto grid = boost::shared_ptr<nav_msgs::OccupancyGrid>(new nav_msgs::OccupancyGrid());
-	grid->header.seq = seq ++;
+	grid->header.seq = seq;
 	grid->header.stamp = Time::now();
 	grid->header.frame_id = "map";
 
 	grid->info.map_load_time = Time::now();
-	grid->info.resolution = 1./static_grid->getResolution();
-	grid->info.width = static_grid->getWidth();
-	grid->info.height = static_grid->getHeight();
-	grid->info.origin = static_map->info.origin;
+	grid->info.resolution = 1./s_grid->getResolution();
+	grid->info.width = s_grid->getWidth();
+	grid->info.height = s_grid->getHeight();
+	grid->info.origin = s_map->info.origin;
 
-	const double *griddata = (*static_grid)[0];
+	const double *griddata = (*s_grid)[0];
 	const int area = grid->info.width * grid->info.height;
 	const double scalepower = 1./log10(area); // Exponential scale factor
 	for (int i = 0; i < area; i ++) {
@@ -118,7 +133,7 @@ int simulateDetectAt(double x, double y, int sourcex, int sourcey, double dt) {
 		gen = new default_random_engine;
 		gen->seed(time(NULL));
 	}
-	double mean = static_grid->encounterRate(x, y, sourcex, sourcey) * dt;//, entropy = static_grid->entropy();
+	double mean = s_grid->encounterRate(x, y, sourcex, sourcey) * dt;//, entropy = s_grid->entropy();
 	poisson_distribution<int> pdist(mean);
 	(*gen)();
 	int detects = pdist(*gen);
@@ -127,14 +142,14 @@ int simulateDetectAt(double x, double y, int sourcex, int sourcey, double dt) {
 }
 
 int8_t getCostMapAt(Pose pose, SubscribedMapTypes type) {
-	auto map = type == 	STATIC_MAP 	? 	static_map :
-				type == LOCAL_COSTMAP ? static_local_costmap :
-										static_global_costmap;
+	auto map = type == 	SubscribedMapTypes::STATIC_MAP 	? 	s_map :
+				type == SubscribedMapTypes::LOCAL_COSTMAP ? s_local_costmap :
+										s_global_costmap;
 	if (map) {
 		int gridx = (int)((pose.position.x - map->info.origin.position.x) / map->info.resolution),
 		gridy = (int)((pose.position.y - map->info.origin.position.y) / map->info.resolution);
 		if (gridx < 0 || gridy < 0 || gridx >= map->info.width || gridy >= map->info.height) {
-			if (type == LOCAL_COSTMAP)
+			if (type == SubscribedMapTypes::LOCAL_COSTMAP)
 				return 0;
 			return -1;
 		}
@@ -148,22 +163,22 @@ int8_t getCostMapAt(Pose pose, SubscribedMapTypes type) {
 }
 
 bool checkMaps(Pose pose) {
-	return	getCostMapAt(pose, STATIC_MAP) == 0 &&
-			getCostMapAt(pose, LOCAL_COSTMAP) == 0 &&
-			getCostMapAt(pose, GLOBAL_COSTMAP) == 0; // Don't go anywhere near an obstacle
+	return	getCostMapAt(pose, SubscribedMapTypes::STATIC_MAP) == 0 &&
+			getCostMapAt(pose, SubscribedMapTypes::LOCAL_COSTMAP) == 0 &&
+			getCostMapAt(pose, SubscribedMapTypes::GLOBAL_COSTMAP) == 0; // Don't go anywhere near an obstacle
 }
 
 double averageProbability(int centerx, int centery, int radius) {
 	int minx = max(centerx-radius, 0),
-		maxx = min(centerx+radius, static_grid->getWidth()),
+		maxx = min(centerx+radius, s_grid->getWidth()),
 		miny = max(centery-radius, 0),
-		maxy = min(centery+radius, static_grid->getHeight());
+		maxy = min(centery+radius, s_grid->getHeight());
 	double sum = 0, coefsum = 0;
 	for (int y = miny; y < maxy; y ++)
 		for (int x = minx; x < maxx; x ++)
 			if (hypot(x-centerx, y-centery)<= radius) { // We're in a rectangle, trimming it down to a circle
 				double coef = exp(-pow(hypot(x-centerx, y-centery)*2./radius, 2)); // Gaussian scaling
-				sum += (*static_grid)[y][x]*coef;
+				sum += (*s_grid)[y][x]*coef;
 				coefsum += coef;
 			}
 	return sum / coefsum;
@@ -186,8 +201,6 @@ void movesToPoseArray(const vector<struct move> &moves, PoseArray &array) {
 
 void addMoves(double gridx, double gridy, Point tr, double dt, int n, vector<struct move> &moves);
 
-static double resolution, max_stepdist, med_stepdist, min_stepdist;
-
 int main(int argc, char *argv[]) {
 	init(argc, argv, "infotaxis_node");
 	NodeHandle node;
@@ -197,10 +210,10 @@ int main(int argc, char *argv[]) {
 
 	double diff, diffrate, windagl, windvel, a, dt, goalTolerance,
 	 	sourcex, sourcey;
-	bool simulate, printimages, detect_while_moving, fast, publish_backtrace;
+	bool simulate, printimages, printcsv, detect_while_moving, fast, publish_backtrace;
 	int w, h, ttl, min_stepnumber, stepnumber, max_stepnumber,
 		movingImageWriteFrequency;
-	string imageDir;
+	string imageDir, csvDir, logfilename;
 
 	priv.param("gas_diffusivity", diff, 10.);
 	priv.param("gas_diff_rate", diffrate, 1.);
@@ -217,16 +230,22 @@ int main(int argc, char *argv[]) {
 	priv.param("min_stepnumber", min_stepnumber, 24);
 	priv.param("stepnumber", stepnumber, 4);
 	priv.param("max_stepnumber", max_stepnumber, 200);
+	priv.param("rescale_ratio", rescale_ratio, 16.0);
+	priv.param("logfile", logfilename, string("run.log"));
 
 	priv.param("publish_backtrace", publish_backtrace, true);
-	priv.param("print_images", printimages, true);
-	priv.param("image_dir", imageDir, true);
+	priv.param("print_images", printimages, false);
+	priv.param("image_dir", imageDir, string("pictures"));
+	priv.param("print_csv", printcsv, false);
+	priv.param("csv_dir", csvDir, string("csvs"));
 	priv.param("detect_while_moving", detect_while_moving, true);
 	priv.param("moving_image_write_frequency", movingImageWriteFrequency, 4);
 	priv.param("goal_tolerance", goalTolerance, .2);
 	priv.param("source_x", sourcex, 0.);
 	priv.param("source_y", sourcey, 0.);
 	priv.param("simulate_source", simulate, false);
+
+	auto logfile = logfilename.length() > 0 ? new ofstream(logfilename) : NULL;
 
 	Rate rate(1);
 	{
@@ -235,9 +254,9 @@ int main(int argc, char *argv[]) {
 		rate = Rate(rate_time);
 	}
 
-	Subscriber mapsub = node.subscribe<nav_msgs::OccupancyGrid>("/map", 1, boost::bind(cmd_callback, _1, STATIC_MAP));
-	Subscriber localcostmapsub = node.subscribe<nav_msgs::OccupancyGrid>("/move_base/local_costmap/costmap", 1, boost::bind(cmd_callback, _1, LOCAL_COSTMAP));
-	Subscriber globalcostmapsub = node.subscribe<nav_msgs::OccupancyGrid>("/move_base/global_costmap/costmap", 1, boost::bind(cmd_callback, _1, GLOBAL_COSTMAP));
+	Subscriber mapsub = node.subscribe<nav_msgs::OccupancyGrid>("/map", 1, boost::bind(cmd_callback, _1, SubscribedMapTypes::STATIC_MAP));
+	Subscriber localcostmapsub = node.subscribe<nav_msgs::OccupancyGrid>("/move_base/local_costmap/costmap", 1, boost::bind(cmd_callback, _1, SubscribedMapTypes::LOCAL_COSTMAP));
+	Subscriber globalcostmapsub = node.subscribe<nav_msgs::OccupancyGrid>("/move_base/global_costmap/costmap", 1, boost::bind(cmd_callback, _1, SubscribedMapTypes::GLOBAL_COSTMAP));
 
 	auto grid_publisher = priv.advertise<nav_msgs::OccupancyGrid>("infotaxis_grid", 1, true);
 	auto array_publisher = priv.advertise<PoseArray>("next_steps", 1, true);
@@ -251,7 +270,7 @@ int main(int argc, char *argv[]) {
 	if (publish_backtrace)
 		backtrace_publisher = priv.advertise<nav_msgs::Path>("backtrace", 1, true);
 
-	static_tfl = new tf::TransformListener();
+	s_tfl = new tf::TransformListener();
 
 	//dt = rate.cycleTime().sec + rate.cycleTime().nsec/1000000000.;
 	auto currentstate = STATE_DETECTING, nextstate = currentstate;
@@ -263,24 +282,25 @@ int main(int argc, char *argv[]) {
 		ROS_INFO("Waiting for the move_base action server to come up");
 	}
 
-	while (!static_map || !static_local_costmap || !static_global_costmap) {
+	while (!s_map || !s_local_costmap || !s_global_costmap) {
 		rate.sleep();
 		spinOnce();
 	}
-	double originx = static_map->info.origin.position.x,
-	originy = static_map->info.origin.position.y;
 	// Convert from OccupancyGrid resolution to InfotaxisGrid resolution
 	// Note: the former is in m/cell while the latter is in cell/m
-	w = (int)(static_map->info.width * static_map->info.resolution * resolution);
-	h = (int)(static_map->info.height * static_map->info.resolution * resolution);
+	w = (int)(s_map->info.width * s_map->info.resolution * resolution);
+	h = (int)(s_map->info.height * s_map->info.resolution * resolution);
 
-	ROS_INFO("Map size : %u:%u * %.3f * %.3f = grid size : %d:%d. Origin offset : %f:%f, source pos : %f:%f, grid pos: %d:%d", static_map->info.width, static_map->info.height, static_map->info.resolution, resolution, w, h, originx, originy, sourcex, sourcey, (int)((sourcex-originx)*resolution), (int)((sourcey-originy)*resolution));
+	if (logfile != NULL)
+		*logfile << w <<" "<< h <<" "<< diff <<" "<< diffrate <<" "<< windvel <<" "<< windagl <<" "<< ttl
+			<<" "<< a <<" "<< resolution <<" "<< fast << dt << endl << endl;
+
+	ROS_INFO("Map size : %u:%u * %.3f * %.3f = grid size : %d:%d. Origin offset : %f:%f, source pos : %f:%f, grid pos: %d:%d", s_map->info.width, s_map->info.height, s_map->info.resolution, resolution, w, h, s_map->info.origin.position.x, s_map->info.origin.position.y, sourcex, sourcey, (int)((sourcex-s_map->info.origin.position.x)*resolution), (int)((sourcey-s_map->info.origin.position.y)*resolution));
 
 	ROS_INFO("Global costmap size : %u:%u * %.3f",
-	static_global_costmap->info.width, static_global_costmap->info.height, static_global_costmap->info.resolution);
+	s_global_costmap->info.width, s_global_costmap->info.height, s_global_costmap->info.resolution);
 
-	infotaxis::InfotaxisGrid* grid = new infotaxis::InfotaxisGrid(w, h, diff, diffrate, windvel, windagl, ttl, a, resolution, !fast);
-	static_grid = boost::shared_ptr<infotaxis::InfotaxisGrid>(grid);
+	s_grid = boost::shared_ptr<infotaxis::InfotaxisGrid>(new infotaxis::InfotaxisGrid(w, h, diff, diffrate, windvel, windagl, ttl, a, resolution, !fast));
 
 	PoseStamped source_pose;
 	source_pose.header.frame_id = "/map";
@@ -289,7 +309,7 @@ int main(int argc, char *argv[]) {
 	source_pose.pose.position.z = 0;
 	source_pose.pose.orientation = tf::createQuaternionMsgFromYaw(windagl);
 
-	int seq = 0, imageseq = 0;
+	int seq = 0, detectseq = 0;
 
 	boost::shared_ptr<nav_msgs::OccupancyGrid> occupancyGrid = buildOccupancyGrid();
 	nav_msgs::Path backtrace;
@@ -298,11 +318,17 @@ int main(int argc, char *argv[]) {
 	vector<struct move> directions, prev_directions;
 	char* filename = new char[64];
 	if (printimages) {
-		sprintf(filename, "rm -f %s/*.png", imageDir);
+		sprintf(filename, "rm -f %s/*.png", imageDir.c_str());
 		system(filename); // clear iteration frames
-		sprintf(filename, "%s/meanfield.png", imageDir);
-		int gridsourcex = (int)((sourcex-originx)*resolution), gridsourcey = (int)((sourcey-originy)*resolution);
+		sprintf(filename, "%s/meanfield.png", imageDir.c_str());
+		int gridsourcex = (int)((sourcex-s_map->info.origin.position.x)*resolution), gridsourcey = (int)((sourcey-s_map->info.origin.position.y)*resolution);
 		writeGrid("pictures/meanfield.png", 0, 0, 1, &gridsourcex, &gridsourcey);
+		ROS_INFO("Printing images to %s", imageDir.c_str());
+	}
+	if (printcsv) {
+		sprintf(filename, "rm -f %s/*.csv", csvDir.c_str());
+		system(filename); // clear iteration frames
+		ROS_INFO("Printing CSVs to %s", csvDir.c_str());
 	}
 
 	while(ok()) {
@@ -316,11 +342,11 @@ int main(int argc, char *argv[]) {
 				stamp.header.frame_id = "/base_link";
 				stamp.pose.position.x = stamp.pose.position.y = stamp.pose.position.z = 0;
 				stamp.pose.orientation = tf::createQuaternionMsgFromYaw(0);
-				static_tfl->transformPose("/map", stamp, basePose);
+				s_tfl->transformPose("/map", stamp, basePose);
 				basePoint = basePose.pose.position;
 			}
-			double gridx = (basePoint.x-originx) * resolution,
-			gridy = (basePoint.y-originy) * resolution;
+			double gridx = (basePoint.x-s_map->info.origin.position.x) * resolution,
+			gridy = (basePoint.y-s_map->info.origin.position.y) * resolution;
 			ROS_DEBUG("Position : %.3f:%.3f, grid position : %d:%d", basePoint.x, basePoint.y,
 			(int)gridx, (int)gridy);
 			switch(currentstate) {
@@ -389,20 +415,28 @@ int main(int argc, char *argv[]) {
 				if (!detect_while_moving) // If true, fall through to DETECTING
 					break;
 				case STATE_DETECTING: {
-					int detections = simulateDetectAt(gridx, gridy, (int)((sourcex-originx)*resolution), (int)((sourcey-originy)*resolution), dt);
-					grid->updateProbas(gridx, gridy, detections, dt);
+					int detections = simulateDetectAt(gridx, gridy, (int)((sourcex-s_map->info.origin.position.x)*resolution), (int)((sourcey-s_map->info.origin.position.y)*resolution), dt);
+					s_grid->updateProbas(gridx, gridy, detections, dt);
+					if (logfile != NULL)
+						*logfile << s_grid->getWidth() <<" "<< s_grid->getHeight()<<" "<< tot_xoff <<" "<< tot_yoff
+						<<" "<< gridx <<" "<< gridy <<" "<< s_grid->entropy() <<" "<< detections << endl;
 					backtrace.poses.push_back(basePose);
 					if (detections > 0)
-						ROS_INFO("Detections : %d, new entropy: %f", detections, grid->entropy());
+						ROS_INFO("Detections : %d, new entropy: %f", detections, s_grid->entropy());
 					if (printimages && (currentstate == STATE_DETECTING ||
 							// while moving, only write images at the given frequency
 							(currentstate == STATE_MOVING && (seq % movingImageWriteFrequency) == 0))) {
-						sprintf(filename, "%s/iteration%04d.png", imageDir, imageseq++);
+						sprintf(filename, "%s/iteration%04d.png", imageDir.c_str(), detectseq);
 						writeGrid(filename, gridx, gridy, 1, nullptr, nullptr);
+					}
+					if (printcsv) {
+						sprintf(filename, "%s/iteration%04d.csv", csvDir.c_str(), detectseq);
+						s_grid->toCSV(filename);
 					}
 					if (currentstate == STATE_DETECTING)
 						nextstate = STATE_PLANNING;
 					occupancyGrid = buildOccupancyGrid();
+					detectseq ++;
 				}
 				break;
 			}
@@ -412,7 +446,7 @@ int main(int argc, char *argv[]) {
 		}
 		PoseArray array;
 		array.header.frame_id = "/map";
-		array.header.seq = seq ++;
+		array.header.seq = seq;
 		array.header.stamp = Time::now();
 		source_pose.header = backtrace.header = array.header;
 		movesToPoseArray(directions, array);
@@ -431,22 +465,28 @@ int main(int argc, char *argv[]) {
 		}
 		if (nextstate == STATE_EXIT)
 			shutdown();
+		seq ++;
 	}
 
+
+	if (logfile != NULL) {
+		logfile->close();
+		delete logfile;
+	}
 	delete[] filename;
-	delete static_tfl;
+	delete s_tfl;
 	ROS_INFO("Exitting gracefully");
 	return 0;
 }
 
 void writeGrid(string filename, double curx, double cury, const int ratio, const int *sourcex, const int *sourcey) {
-	const int imgw = static_grid->getWidth() * ratio, imgh = static_grid->getHeight() * ratio;
+	const int imgw = s_grid->getWidth() * ratio, imgh = s_grid->getHeight() * ratio;
 	png::image<png::rgb_pixel> image((size_t) imgw, (size_t) imgh);
 
 	if (sourcex == NULL || sourcey == NULL)
-		static_grid->writeProbabilityField(image, ratio);
+		s_grid->writeProbabilityField(image, ratio);
 	else
-		static_grid->writeMeanStationaryField(image, *sourcex, *sourcey, ratio);
+		s_grid->writeMeanStationaryField(image, *sourcex, *sourcey, ratio);
 	image.write(filename);
 }
 
@@ -456,9 +496,11 @@ void addMoves(double gridx, double gridy, Point ori, double dt, int n, vector<st
 		maxdist = (interest) * min_stepdist + (1.-interest) * med_stepdist;
 	ROS_DEBUG("Interest: %f. dist range = [%.2f:%.2f]", interest, mindist, maxdist);
 
-	int targetSize = moves.size() + n;
-	auto mapinfo = static_global_costmap->info;
-	while (moves.size() < targetSize) {
+	const int GIVEUP = 50;
+	int tries = 0, targetSize = moves.size() + n;
+	auto mapinfo = s_global_costmap->info;
+	while (moves.size() < targetSize && tries < GIVEUP) {
+		tries ++;
 		double dist = (rand()/(double)RAND_MAX) * (maxdist-mindist) + mindist,
 			x = cos(angle) * dist, y = sin(angle) * dist;
 		Pose pose;
@@ -473,9 +515,14 @@ void addMoves(double gridx, double gridy, Point ori, double dt, int n, vector<st
 		}
 		if (checkMaps(pose)) {
 			infotaxis::Direction direc = {x * resolution, y * resolution};
-			moves.push_back((struct move){direc, pose, static_grid->getMoveValue(gridx, gridy, dt, direc)});
+			moves.push_back((struct move){direc, pose, s_grid->getMoveValue(gridx, gridy, dt, direc)});
 			angle += 2*M_PI/n;
-		} else
+			tries = 0;
+		} else {
 			ROS_DEBUG("Move at %.1f obstructed", angle*180/M_PI);
+			angle += rand()*(M_PI / 2) / RAND_MAX;
+		}
 	}
+	if (moves.size() == 0)
+		throw runtime_error("Couldn't calculate any direction");
 }

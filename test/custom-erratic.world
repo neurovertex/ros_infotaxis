@@ -23,9 +23,10 @@ define erratic position
   size [0.350 0.350 0.250]
   origin [-0.050 0.000 0.000 0.000]
   gui_nose 1
-  drive "diff"
+  drive "omni"
   topurg(pose [ 0.050 0.000 0.000 0.000 ])
   max_trans_vel 1.0
+  direct_wheel_vel_control 1
 )
 
 define floorplan model

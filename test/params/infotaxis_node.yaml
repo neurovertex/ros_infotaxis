@@ -1,7 +1,7 @@
 # Note that this must be loaded in the namespace of the node's name
 gas_diffusivity: 10.
 gas_diff_rate: 1.
-gas_ttl: 1.
+gas_ttl: 2250.
 wind_angle: -0.8726
 wind_velocity: 1.
 sensor_radius: 1
@@ -15,10 +15,13 @@ med_stepdist: 1
 min_stepnumber: 24
 stepnumber: 4
 max_stepnumber: 200
+rescale_ratio: 16.0
 
 publish_backtrace: true
-print_images: true
+print_images: false
 image_dir: pictures
+print_csv: true
+csv_dir: csvs
 detect_while_moving: true
 moving_image_write_frequency: 4
 run_rate: 1
