@@ -8,8 +8,7 @@ Requirements
 Software
 --------
 
-This node needs a map and a location. The two obvious approaches are map_server + AMCL or SLAM. Changes in map size aren't supported for now so be sure to configure SLAM with a static map size if using that.
-This node will also need the navigation stack (move_base), and won't run without a global costmap and a local costmap being published.
+This node needs a map and a location. The two obvious approaches are map_server + AMCL or SLAM. This node will also need the navigation stack (move_base), and won't run without a global costmap and a local costmap being published.
 
 Hardware
 --------
